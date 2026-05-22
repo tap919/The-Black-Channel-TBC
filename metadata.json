@@ -1,0 +1,6 @@
+{
+  "name": "The Press Network",
+  "description": "The digital home for mature hip-hop culture, community radio, podcasts, custom business playbooks, and daily sports predictions.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
