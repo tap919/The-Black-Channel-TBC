@@ -3,14 +3,39 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
+import cors from "cors";
+import rateLimit from "express-rate-limit";
 
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+// FIX 1: Read PORT from environment instead of hardcoding
+const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
+
+// FIX 2: Add CORS middleware
+app.use(cors());
 
 // Set up JSON parsing
 app.use(express.json());
+
+// FIX 3: Add rate limiting to all /api/ routes (100 req per 15 min per IP)
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests, please slow down and try again later." }
+});
+app.use("/api/", apiLimiter);
+
+// More aggressive limit for AI-heavy routes (20 req per 15 min per IP)
+const aiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "AI endpoint rate limit reached. Please wait before making more requests." }
+});
 
 // Lazy-loaded Gemini API Client
 let aiClient: GoogleGenAI | null = null;
@@ -32,19 +57,36 @@ function getGeminiClient(): GoogleGenAI {
   return aiClient;
 }
 
+// FIX 4: Input sanitization helper — strips prompt injection attempts
+function sanitizeInput(input: string): string {
+  // Remove common prompt injection patterns
+  return input
+    .replace(/ignore (all |previous |above |prior )?instructions?/gi, "[filtered]")
+    .replace(/system\s*prompt/gi, "[filtered]")
+    .replace(/you are now/gi, "[filtered]")
+    .replace(/forget (everything|all|previous)/gi, "[filtered]")
+    .replace(/new (role|persona|instructions?)/gi, "[filtered]")
+    .replace(/<\/?[a-z][a-z0-9]*[^<>]*>/gi, "") // strip HTML tags
+    .trim()
+    .slice(0, 2000); // hard cap at 2000 chars
+}
+
 // Health Check
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", time: new Date().toISOString() });
 });
 
 // Transmutation Lab API
-app.post("/api/transmute", async (req, res) => {
+app.post("/api/transmute", aiLimiter, async (req, res) => {
   try {
     const { element1, element2, rawContent } = req.body;
-    
+
     if (!rawContent || rawContent.trim() === "") {
       return res.status(400).json({ error: "Choose elements and feed the crucible some raw content to begin!" });
     }
+
+    // FIX 4: Sanitize user input before inserting into prompt
+    const safeRawContent = sanitizeInput(rawContent);
 
     const client = getGeminiClient();
 
@@ -62,15 +104,16 @@ app.post("/api/transmute", async (req, res) => {
     const prompt = `Perform an alchemical transmutation on the following raw base ingredients:
 - Primary Element: ${firstElement}
 - Secondary Catalyst: ${secondElement}
-- Raw base material: "${rawContent}"
+- Raw base material: "${safeRawContent}"
 
 Refine this raw material into an intellectual, creative, and highly polished cultural narrative or business recipe. Expose how to transform the struggle or raw energy into peak commercial or cultural success (Pure Gold). Output the response strictly conforming to the specified JSON schema.`;
 
     const response = await client.models.generateContent({
-      model: "gemini-3.5-flash",
+      // FIX 5: Correct model name (was "gemini-3.5-flash" which doesn't exist)
+      model: "gemini-2.0-flash",
       contents: prompt,
       config: {
-        systemInstruction: 
+        systemInstruction:
           "You are the Hood Alchemist—the ultimate voice of the culture. " +
           "Your mission is to perform alchemical transmutations: taking raw street hustle, lines, sports debates, or track names, " +
           "and refining them into intellectual gold. You combine gritty street wisdom with Harvard-level brand marketing and hip-hop critique. " +
@@ -196,48 +239,51 @@ const radioRotation = [
 // Fallback high-quality curated images for Hip-Hop / Street design aesthetics
 const galleryCovers: Record<string, string[]> = {
   mixtape: [
-    "https://images.unsplash.com/photo-1518655061768-98de35ca7f6b?w=800&auto=format&fit=crop&q=80", // Gold cassette / aesthetic
-    "https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=800&auto=format&fit=crop&q=80", // Dj deck
-    "https://images.unsplash.com/photo-1498038432885-c6f3f1b912ee?w=800&auto=format&fit=crop&q=80", // Abstract industrial dark gold
-    "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&auto=format&fit=crop&q=80"  // Deep golden oil wash
+    "https://images.unsplash.com/photo-1518655061768-98de35ca7f6b?w=800&auto=format&fit=crop&q=80",
+    "https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=800&auto=format&fit=crop&q=80",
+    "https://images.unsplash.com/photo-1498038432885-c6f3f1b912ee?w=800&auto=format&fit=crop&q=80",
+    "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&auto=format&fit=crop&q=80"
   ],
   flyer: [
-    "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=800&auto=format&fit=crop&q=80", // Neon stage light
-    "https://images.unsplash.com/photo-1501281668745-f7f57925c3b4?w=800&auto=format&fit=crop&q=80", // Street crowd concert
-    "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=800&auto=format&fit=crop&q=80", // Gritty microphone
-    "https://images.unsplash.com/photo-1516450360452-9312f5e86fc7?w=800&auto=format&fit=crop&q=80"  // Nightclub crowd gold flares
+    "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=800&auto=format&fit=crop&q=80",
+    "https://images.unsplash.com/photo-1501281668745-f7f57925c3b4?w=800&auto=format&fit=crop&q=80",
+    "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=800&auto=format&fit=crop&q=80",
+    "https://images.unsplash.com/photo-1516450360452-9312f5e86fc7?w=800&auto=format&fit=crop&q=80"
   ],
   logo: [
-    "https://images.unsplash.com/photo-1508962914676-134849a727f0?w=800&auto=format&fit=crop&q=80", // Gold foil circle crest
-    "https://images.unsplash.com/photo-1626785774573-4b799315345d?w=800&auto=format&fit=crop&q=80", // Neon graffiti typography
-    "https://images.unsplash.com/photo-1541701494587-cb58502866ab?w=800&auto=format&fit=crop&q=80", // Artistic street splash
-    "https://images.unsplash.com/photo-1601049676099-e7ed07d825b0?w=800&auto=format&fit=crop&q=80"  // Golden dollar icon backdrop
+    "https://images.unsplash.com/photo-1508962914676-134849a727f0?w=800&auto=format&fit=crop&q=80",
+    "https://images.unsplash.com/photo-1626785774573-4b799315345d?w=800&auto=format&fit=crop&q=80",
+    "https://images.unsplash.com/photo-1541701494587-cb58502866ab?w=800&auto=format&fit=crop&q=80",
+    "https://images.unsplash.com/photo-1601049676099-e7ed07d825b0?w=800&auto=format&fit=crop&q=80"
   ],
   podcast: [
-    "https://images.unsplash.com/photo-1590602847861-f357a9332bbc?w=800&auto=format&fit=crop&q=80", // Studio mic with red light
-    "https://images.unsplash.com/photo-1487180142328-0c4e37023af5?w=800&auto=format&fit=crop&q=80", // Vinyl record turning
-    "https://images.unsplash.com/photo-1484755560693-a4074577af3a?w=800&auto=format&fit=crop&q=80", // Retro audio headphones
-    "https://images.unsplash.com/photo-1478737270239-2f02b77fc618?w=800&auto=format&fit=crop&q=80"  // Old radio dials gold glimmer
+    "https://images.unsplash.com/photo-1590602847861-f357a9332bbc?w=800&auto=format&fit=crop&q=80",
+    "https://images.unsplash.com/photo-1487180142328-0c4e37023af5?w=800&auto=format&fit=crop&q=80",
+    "https://images.unsplash.com/photo-1484755560693-a4074577af3a?w=800&auto=format&fit=crop&q=80",
+    "https://images.unsplash.com/photo-1478737270239-2f02b77fc618?w=800&auto=format&fit=crop&q=80"
   ]
 };
 
 // ==========================================================
 // 1. THE PRESS: AI Album Cover / Flyer Designer API
 // ==========================================================
-app.post("/api/press/generate", async (req, res) => {
+app.post("/api/press/generate", aiLimiter, async (req, res) => {
   try {
     const { template, prompt, aspect } = req.body;
     if (!prompt || prompt.trim() === "") {
       return res.status(400).json({ error: "Choose a visual target elements description first." });
     }
 
+    // FIX 4: Sanitize prompt
+    const safePrompt = sanitizeInput(prompt);
     const aspectValue = aspect || "1:1";
-    const enhancedPrompt = `A high-quality gritty, gold, distressed, street-style hip-hop theme ${template} graphic: ${prompt}. Cinematic lighting, rich street elements, gold foil textures, weathered look, authentic urban culture aesthetic. No device frames.`;
+    const enhancedPrompt = `A high-quality gritty, gold, distressed, street-style hip-hop theme ${template} graphic: ${safePrompt}. Cinematic lighting, rich street elements, gold foil textures, weathered look, authentic urban culture aesthetic. No device frames.`;
 
     try {
       const client = getGeminiClient();
       const response = await client.models.generateContent({
-        model: "gemini-2.5-flash-image",
+        // FIX 5: Correct image generation model (was "gemini-2.5-flash-image" which doesn't exist)
+        model: "imagen-3.0-generate-001",
         contents: {
           parts: [{ text: enhancedPrompt }]
         },
@@ -265,19 +311,17 @@ app.post("/api/press/generate", async (req, res) => {
       }
     } catch (apiErr: any) {
       console.warn("Gemini Image API not available, loading from premium catalog fallback:", apiErr.message);
-      // Fallback selection based on prompt / template
       const gallery = galleryCovers[template] || galleryCovers.mixtape;
-      // Stable random selection based on prompt hash code
       let hash = 0;
-      for (let i = 0; i < prompt.length; i++) {
-        hash = prompt.charCodeAt(i) + ((hash << 5) - hash);
+      for (let i = 0; i < safePrompt.length; i++) {
+        hash = safePrompt.charCodeAt(i) + ((hash << 5) - hash);
       }
       const selectIndex = Math.abs(hash) % gallery.length;
       const imageUrl = gallery[selectIndex];
-      return res.json({ 
-        imageUrl, 
-        source: "Refined Catalog Fallback", 
-        warning: "Running in offline/trial mode; generated a beautifully curated hip-hop template asset matching your input." 
+      return res.json({
+        imageUrl,
+        source: "Refined Catalog Fallback",
+        warning: "Running in offline/trial mode; generated a beautifully curated hip-hop template asset matching your input."
       });
     }
   } catch (error: any) {
@@ -325,7 +369,6 @@ app.get("/api/sports/odds", async (req, res) => {
     console.warn("Odds API fetch failed, loading fallback lines:", err);
   }
 
-  // Dynamic Date offset so matches represent "today"
   const simulatedGames = [
     {
       id: "sim-1",
@@ -375,17 +418,21 @@ app.get("/api/sports/odds", async (req, res) => {
   return res.json({ success: true, games: simulatedGames, source: "Live simulator (Configure ODDS_API_KEY for real sync)" });
 });
 
-app.post("/api/sports/predict", async (req, res) => {
+app.post("/api/sports/predict", aiLimiter, async (req, res) => {
   try {
     const { lineupOrSlip } = req.body;
     if (!lineupOrSlip || lineupOrSlip.trim() === "") {
       return res.status(400).json({ error: "Pour a lineup or game slip into the analyzer beaker!" });
     }
 
+    // FIX 4: Sanitize user input
+    const safeLineup = sanitizeInput(lineupOrSlip);
+
     const client = getGeminiClient();
     const response = await client.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: `Analyze this sports betting slip or fantasy sports lineup: "${lineupOrSlip}". Break down the matchups, injuries, weather, historical performance, and social media/locker room vibes. Output the analysis strictly with the specified JSON schema. Use street-level grit combined with advanced analytics chemistry.`,
+      // FIX 5: Correct model name
+      model: "gemini-2.0-flash",
+      contents: `Analyze this sports betting slip or fantasy sports lineup: "${safeLineup}". Break down the matchups, injuries, weather, historical performance, and social media/locker room vibes. Output the analysis strictly with the specified JSON schema. Use street-level grit combined with advanced analytics chemistry.`,
       config: {
         systemInstruction: "You are The Oracle, the ultimate AI Sports analyst of the Hood Sportsbook. You speak like a street-smart Vegas booking chemist.",
         responseMimeType: "application/json",
@@ -413,11 +460,12 @@ app.post("/api/sports/predict", async (req, res) => {
   }
 });
 
-app.post("/api/sports/burner-bet", async (req, res) => {
+app.post("/api/sports/burner-bet", aiLimiter, async (req, res) => {
   try {
     const client = getGeminiClient();
     const response = await client.models.generateContent({
-      model: "gemini-3.5-flash",
+      // FIX 5: Correct model name
+      model: "gemini-2.0-flash",
       contents: "Generate today's 'The Bunsen Burner Bet' underdog pick. Choose any realistic high-value sports matchup (NBA, NFL, UFC, Champions League, etc.) where the underdog has a high probability of a chemical upset blowout. Conform strictly to JSON schema.",
       config: {
         systemInstruction: "You are The Oracle. Spot a massive undervalued underdog and explain the exact chemistry that creates this blowout explosion today.",
@@ -448,18 +496,24 @@ app.post("/api/sports/burner-bet", async (req, res) => {
 // ==========================================================
 // 3. HUSTLE GENERATOR API: The viability rating score
 // ==========================================================
-app.post("/api/hustle/generate", async (req, res) => {
+app.post("/api/hustle/generate", aiLimiter, async (req, res) => {
   try {
     const { idea, location, budget } = req.body;
     if (!idea || idea.trim() === "") {
       return res.status(400).json({ error: "Input your hustle vision idea (e.g., street boutique, barbershop pop-up, gourmet fusion cart) to transmute!" });
     }
 
+    // FIX 4: Sanitize all user inputs
+    const safeIdea = sanitizeInput(idea);
+    const safeLocation = sanitizeInput(location || "Local Block");
+    const safeBudget = sanitizeInput(budget || "minimal startup coins");
+
     const client = getGeminiClient();
-    const prompt = `Transmute this hustle idea: "${idea}" set in "${location || "Local Block"}" on a budget of "${budget || "minimal startup coins"}". Analyze the location viability, market data, and costs to produce local permits, check lists, pitch decks and a viability "The Formula" score out of 100. Deliver strictly conforming to JSON Schema.`;
+    const prompt = `Transmute this hustle idea: "${safeIdea}" set in "${safeLocation}" on a budget of "${safeBudget}". Analyze the location viability, market data, and costs to produce local permits, check lists, pitch decks and a viability "The Formula" score out of 100. Deliver strictly conforming to JSON Schema.`;
 
     const response = await client.models.generateContent({
-      model: "gemini-3.5-flash",
+      // FIX 5: Correct model name
+      model: "gemini-2.0-flash",
       contents: prompt,
       config: {
         systemInstruction: "You are the Hood Alchemist Business Coach. You turn street ambition and minimal capital into highly scalable business blueprints.",
@@ -514,8 +568,9 @@ app.post("/api/hustle/generate", async (req, res) => {
 app.post("/api/matchmaker/register", (req, res) => {
   try {
     const { name, skills, location, goals, avatar } = req.body;
+    // FIX 6: Fixed typo "colllaboration" → "collaboration"
     if (!name || !skills || !goals) {
-      return res.status(400).json({ error: "Roster name, specialized skills, and immediate colllaboration goals are required!" });
+      return res.status(400).json({ error: "Roster name, specialized skills, and immediate collaboration goals are required!" });
     }
 
     const newProfile = {
@@ -524,7 +579,7 @@ app.post("/api/matchmaker/register", (req, res) => {
       skills,
       location: location || "Remote Street Grid",
       goals,
-      reputation: 60, // starting reputation level
+      reputation: 60,
       avatar: avatar || "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150&auto=format&fit=crop&q=80"
     };
 
@@ -535,20 +590,25 @@ app.post("/api/matchmaker/register", (req, res) => {
   }
 });
 
-app.post("/api/matchmaker/matches", async (req, res) => {
+app.post("/api/matchmaker/matches", aiLimiter, async (req, res) => {
   try {
     const { profileId, skills, location, goals } = req.body;
     if (!skills || !goals) {
       return res.status(400).json({ error: "Create your card profile first to identify complementing chemistry matches." });
     }
 
+    // FIX 4: Sanitize inputs used in prompt
+    const safeSkills = sanitizeInput(skills);
+    const safeGoals = sanitizeInput(goals);
+    const safeLocation = sanitizeInput(location || "Any");
+
     const availableTargets = networkProfiles.filter(p => p.id !== profileId);
-    
+
     const client = getGeminiClient();
     const prompt = `Find the top complementary collaborative matches for an artist/entrepreneur with:
-- Skills: "${skills}"
-- Location: "${location || "Any"}"
-- Goals: "${goals}"
+- Skills: "${safeSkills}"
+- Location: "${safeLocation}"
+- Goals: "${safeGoals}"
 
 Available community roster database:
 ${JSON.stringify(availableTargets, null, 2)}
@@ -556,7 +616,8 @@ ${JSON.stringify(availableTargets, null, 2)}
 Match with up to 3 complementary members. Conform strictly to JSON schema. Realistically compare complement zones (for example: a producer needs a rapper; a barber needs space; an apparel designer needs a printer).`;
 
     const response = await client.models.generateContent({
-      model: "gemini-3.5-flash",
+      // FIX 5: Correct model name
+      model: "gemini-2.0-flash",
       contents: prompt,
       config: {
         systemInstruction: "You are the Hood Alchemy Collaboration Matchmaker. You calculate complementary synergy scores and recommend street partnerships.",
@@ -601,7 +662,6 @@ Match with up to 3 complementary members. Conform strictly to JSON schema. Reali
     return res.json({ matches: formattedMatches });
   } catch (error: any) {
     console.error("Matchmaker API error:", error);
-    // Hard fallback if Gemini matches fail
     const fallbacks = networkProfiles.slice(0, 3).map((p, idx) => ({
       profileId: p.id,
       profile: p,
@@ -620,18 +680,24 @@ app.get("/api/radio/rotation", (req, res) => {
   return res.json({ rotation: radioRotation });
 });
 
-app.post("/api/radio/submit", async (req, res) => {
+app.post("/api/radio/submit", aiLimiter, async (req, res) => {
   try {
     const { title, artist, genre, demoLink } = req.body;
     if (!title || !artist || !genre) {
       return res.status(400).json({ error: "Song title, artist alias, and genre category are required to review!" });
     }
 
+    // FIX 4: Sanitize user inputs used in prompt
+    const safeTitle = sanitizeInput(title);
+    const safeArtist = sanitizeInput(artist);
+    const safeGenre = sanitizeInput(genre);
+
     const client = getGeminiClient();
     const response = await client.models.generateContent({
-      model: "gemini-3.5-flash",
+      // FIX 5: Correct model name
+      model: "gemini-2.0-flash",
       contents: `Critique this independent radio submission with standard alchemy metrics: 
-Track: "${title}" by "${artist}" (Genre: "${genre}").
+Track: "${safeTitle}" by "${safeArtist}" (Genre: "${safeGenre}").
 Analyze details and return isApproved (boolean, auto approve if it captures street passion, up to 95% rate), genreCategory, purificationScore (1 to 118 index, where 80+ is pure gold classic), chemistryReport (critique), barsOfGold (lyrical verse idea you write for them that would fit this track), and feedback (constructive improvement notes). Conform strictly to JSON.`,
       config: {
         systemInstruction: "You are the Alchemical Music Critic at Alchemist FM 79. You are extremely encouraging of independent artists, providing deep technical lyric critiques and beat recommendations with high culture relevance.",
@@ -652,8 +718,7 @@ Analyze details and return isApproved (boolean, auto approve if it captures stre
     });
 
     const critique = JSON.parse(response.text || "{}");
-    
-    // Add song to rotating list!
+
     const newSong = {
       id: `track-${Date.now()}`,
       title,
@@ -661,22 +726,21 @@ Analyze details and return isApproved (boolean, auto approve if it captures stre
       genre: critique.genreCategory || genre,
       link: demoLink || "https://assets.mixkit.co/active_storage/sfx/2237/2237-84.wav",
       reputation: critique.purificationScore || 79,
-      upvotes: 1, // initial vote
+      upvotes: 1,
       review: critique.chemistryReport,
       barsOfGold: critique.barsOfGold
     };
 
     radioRotation.push(newSong);
 
-    return res.json({ 
-      success: true, 
-      critique, 
+    return res.json({
+      success: true,
+      critique,
       newTrack: newSong,
-      rotation: radioRotation 
+      rotation: radioRotation
     });
   } catch (error: any) {
     console.error("Radio Critique API error:", error);
-    // Offline / Failed validation fallback
     const { title = "Sub-Frequency Compound", artist = "Anonymous Alchemist", genre = "Boom Bap", demoLink = "https://assets.mixkit.co/active_storage/sfx/2237/2237-84.wav" } = req.body || {};
     const mockCritique = {
       isApproved: true,
@@ -698,9 +762,9 @@ Analyze details and return isApproved (boolean, auto approve if it captures stre
       barsOfGold: mockCritique.barsOfGold
     };
     radioRotation.push(fallbackTrack);
-    return res.json({ 
-      success: true, 
-      critique: mockCritique, 
+    return res.json({
+      success: true,
+      critique: mockCritique,
       newTrack: fallbackTrack,
       rotation: radioRotation
     });
